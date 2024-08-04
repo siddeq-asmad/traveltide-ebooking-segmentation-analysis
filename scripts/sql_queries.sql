@@ -1,22 +1,17 @@
 /*
+This script creates temp tables for customer segmentation based on activity within the following constraints:
+
 Time Cohort:
-- Sessions after 2023-01-04 (after the new year holiday)
+Sessions after 2023-01-04 (after the new year holiday).
 
 Behaviour Cohort:
-- Users that had more than 7 sessions during that period
-	OR users that booked at least 2 trips during that period
-
-
-Create a temp table for sessions in our cohort
-
-1st CTE returns user_ids that had more than 7 sessions OR booked at least 2 trips after 4th Jan 2023
-2nd CTE keeps only sessions after the cutoff date and of non active users via an inner join.
-The final query joins the flights and hotels tables
-- Applies a 1 night penalty for users that did not cancel their hotel on our app, this appears as negative nights on our system.
-- Discounts are applied to the hotel and flight prices and savings columns are added.
+Users that had more than 7 sessions during that period OR users that booked at least 2 trips during that period.
 */
 
+-- QUERY 1: Temp table for sessions in our cohort.
 CREATE TEMP TABLE filtered_sessions AS
+
+-- Returns user_ids that had more than 7 sessions OR booked at least 2 trips after 4th Jan 2023.
 WITH active_users AS (
     SELECT user_id
     FROM sessions
@@ -26,6 +21,7 @@ WITH active_users AS (
   		OR COUNT(DISTINCT trip_id) >= 2
 ),
 
+	-- Keep only sessions after the cutoff date and only of active users via an inner join with the 1st CTE.
 	active_users_sessions AS (
     SELECT sessions.*
     FROM sessions
@@ -34,28 +30,33 @@ WITH active_users AS (
     WHERE DATE_TRUNC('day', session_start) > '2023-01-04'
 )
 
+/*
+Join the flights and hotels tables to the 2nd CTE.
+Apply a 1 night penalty for users that did not cancel their hotel on our app, this appears as negative nights on our system.
+Discounts are applied to the hotel and flight price columns and corresponding savings columns are added.
+*/
 SELECT active_users_sessions.*,
-       ROUND(EXTRACT(EPOCH FROM session_end - session_start), 0) AS session_length_seconds,
-       hotel_name,
-       CASE WHEN nights < 1 THEN 1 ELSE nights END AS nights,
-       hotels.rooms,
-       hotels.check_in_time,
-       hotels.check_out_time,
-       hotels.hotel_per_room_usd * (1 - COALESCE(hotel_discount_amount, 0)) AS final_hotel_per_room_usd,
-       hotels.hotel_per_room_usd * COALESCE(hotel_discount_amount, 0) AS hotel_savings_per_room_usd,
-       flights.origin_airport,
-       flights.destination,
-       flights.destination_airport,
-       flights.seats, 
-       flights.return_flight_booked,
-       flights.departure_time,
-       flights.return_time,
-       flights.checked_bags,
-       flights.trip_airline,
-       flights.destination_airport_lat,
-       flights.destination_airport_lon,
-       flights.base_fare_usd * (1 - COALESCE(flight_discount_amount, 0)) AS final_fare_usd,
-       flights.base_fare_usd * COALESCE(flight_discount_amount, 0) AS fare_savings
+	 ROUND(EXTRACT(EPOCH FROM session_end - session_start), 0) AS session_length_seconds,
+	 hotel_name,
+	 CASE WHEN nights < 1 THEN 1 ELSE nights END AS nights,
+	 hotels.rooms,
+	 hotels.check_in_time,
+	 hotels.check_out_time,
+	 hotels.hotel_per_room_usd * (1 - COALESCE(hotel_discount_amount, 0)) AS final_hotel_per_room_usd,
+	 hotels.hotel_per_room_usd * COALESCE(hotel_discount_amount, 0) AS hotel_savings_per_room_usd,
+	 flights.origin_airport,
+	 flights.destination,
+	 flights.destination_airport,
+	 flights.seats, 
+	 flights.return_flight_booked,
+	 flights.departure_time,
+	 flights.return_time,
+	 flights.checked_bags,
+	 flights.trip_airline,
+	 flights.destination_airport_lat,
+	 flights.destination_airport_lon,
+	 flights.base_fare_usd * (1 - COALESCE(flight_discount_amount, 0)) AS final_fare_usd,
+	 flights.base_fare_usd * COALESCE(flight_discount_amount, 0) AS fare_savings
 FROM active_users_sessions
 LEFT JOIN hotels
 	ON active_users_sessions.trip_id = hotels.trip_id
@@ -63,26 +64,17 @@ LEFT JOIN flights
 	ON active_users_sessions.trip_id = flights.trip_id
 ;
 
-/*
-Create a temp table for completed trips
-
-1st CTE returns trip_id of cancelled trips
-2nd CTE filters out trips that were cancelled
-The final query adds calculated columns for:
-- Time between booking session to start of trip
-- Distance flown with Haversine formula, used to calculate the distance between two locations on a sphere
-- Trip length depending on booking options
-- Total cost of hotel stay
-- Total cost of flights
-- Total cost of trip
-*/
+-- QUERY 2: Temp table for completed trips.
 CREATE TEMP TABLE completed_trips AS
+
+-- Return trip_id of cancelled trips.
 WITH cancelled_trips AS (
   	SELECT trip_id AS cancel_id
 		FROM filtered_sessions
 		WHERE cancellation = TRUE
 ),
 
+	-- Filter out trips that were cancelled.
 	non_cancelled_trips AS (
     SELECT sessions.*
     FROM filtered_sessions AS sessions
@@ -92,6 +84,13 @@ WITH cancelled_trips AS (
     	AND cancelled.cancel_id IS NULL
 )
 
+/*
+Calculated columns for:
+Time between booking session to start of trip.
+Distance flown with Haversine formula, used to calculate the distance between two locations on a sphere (Earth).
+Trip length depending on booking options.
+Total cost of hotel, flights as well as the whole trip.
+*/
 SELECT trips.*,
   EXTRACT(DAY FROM
     CASE WHEN flight_booked = True
@@ -129,7 +128,7 @@ JOIN users
 	ON trips.user_id = users.user_id
 ;
 
--- Add further calculations that depend on the previously created distance_flown_km
+-- QUERY 3 & 4: Add columns and apply further calculations using the distance_flown_km that was created in the second query.
 ALTER TABLE completed_trips
 ADD COLUMN flight_cost_per_km NUMERIC,
 ADD COLUMN cost_saved_per_km NUMERIC
@@ -144,7 +143,8 @@ SET flight_cost_per_km = CASE WHEN distance_flown_km > 0
     ELSE NULL END
 ;
 
--- Create an aggregated temp table of completed trips grouped by user
+
+-- QUERY 5: Create an aggregated temp table of completed trips grouped by user.
 CREATE TEMP TABLE user_agg_completed_trips AS
 SELECT user_id,
   COUNT(trip_id) AS completed_trips,
@@ -170,7 +170,7 @@ FROM completed_trips
 GROUP BY user_id
 ;
 
--- Create an aggregated temp table of application sessions grouped by user
+-- QUERY 6: Create an aggregated temp table of application sessions grouped by user
 CREATE TEMP TABLE user_agg_all_sessions AS
 SELECT user_id,
   COUNT(DISTINCT session_id) AS sessions,
@@ -187,7 +187,7 @@ FROM filtered_sessions
 GROUP BY user_id
 ;
 
--- Return table of user behaviour
+-- QUERY 7: Return table of user behaviour
 SELECT users.user_id,
    EXTRACT(YEAR FROM AGE('2023-07-02'::DATE, birthdate)) AS age,
    users.gender,
@@ -224,6 +224,7 @@ LEFT JOIN user_agg_completed_trips AS trips
   ON sessions.user_id = trips.user_id
 ;
 
+-- QUERY 8: Drop temp tables after extracting CSV and running exploratory queries.
 DROP TABLE filtered_sessions,
 	completed_trips,
 	user_agg_completed_trips,
